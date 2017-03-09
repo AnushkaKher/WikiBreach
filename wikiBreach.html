@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset='utf-8' />
+  </head>
+  <body>
+    <!--Add a button for the user to click to initiate auth sequence -->
+    <button id="authorize-button" style="visibility: hidden">Authorize</button>
+    <div id="content" align="center">
+      <!-- Button to make a diffbot request-->
+      <p>Click on Diffbot Request to initiate a get request to diffbot, to extract meta-data of articles.
+        To download the response in json format, click on download.</p>
+      <button id="diffbotGetRequest" onClick="diffbotGetRequest()">DiffbotRequest</button>
+      <!-- Button to create a json array-->
+      <button id="diffbotTable" onClick="createResponseJSON()">Download Response</button>
+  </div>
+    
+  <script type="text/javascript" src="diffbot.js"></script>
+  <script type="text/javascript" src="http://code.jquery.com/jquery-1.9.0.js"></script>
+  <script type="text/javascript">
+    $(function(){
+    $("#diffbotTable").click(function(){
+        var url='data:application/vnd.json,' + encodeURIComponent(extractedArticleDetails) 
+        location.href=url
+        return false
+    })
+})
+      var messageDetails = new Array();
+      var diffbotResponse = new Array();
+      var extractedArticleDetails = new Array();
+
+      // base64url dictionary
+      var b64u = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";  
+      var b64pad = '=';
+
+      // Diffbot developer token
+      var clientBot = new Diffbot("20d1865d2b8cb0564199105596d0c6f6");
+
+      // Client ID for a web application from the Google Developer Console.
+      var clientId = '917422261850-0mdrmuv56tlf738jav6nqfqt9djhk4fl.apps.googleusercontent.com';
+
+      // To enter one or more authentication scopes, refer to the documentation for the API.
+      var scopes = 'https://www.googleapis.com/auth/gmail.readonly';
+
+      // Button to handle authentication the first time.
+      function handleClientLoad() {
+        window.setTimeout(checkAuth,1);
+      }
+
+      function checkAuth() {
+        gapi.auth.authorize({client_id: clientId, scope: scopes, immediate: true}, handleAuthResult);
+      }
+
+      function handleAuthResult(authResult) {
+        var authorizeButton = document.getElementById('authorize-button');
+        if (authResult && !authResult.error) {
+          authorizeButton.style.visibility = 'hidden';
+          makeApiCall();
+        } else {
+          authorizeButton.style.visibility = '';
+          authorizeButton.onclick = handleAuthClick;
+        }
+      }
+
+      function handleAuthClick(event) {
+        gapi.auth.authorize({client_id: clientId, scope: scopes, immediate: false}, handleAuthResult);
+        return false;
+      }
+
+      // Load the API and make an API call.
+      function makeApiCall() {
+        gapi.client.load('gmail', 'v1', function() {
+          listMessages();
+        });
+      }
+
+      // gets id's of messages (emails)
+      function listMessages() {
+        var userId = "me";
+        var getPageOfMessages = function(request, result) {
+          request.execute(function(resp) {
+            result = result.concat(resp.messages);
+            var nextPageToken = resp.nextPageToken;
+            if(nextPageToken) {
+              var request = gapi.client.gmail.users.messages.list({
+                'userId': userId,
+                'pageToken': nextPageToken
+              });
+              getPageOfMessages(request, result);
+            }
+           
+           else {
+              for(var i = 0; i < 50/* result.length*/; i++) {
+               getMessageSnippet((i+1), result[i].id);
+             }
+           }
+          });
+        }
+
+        var initialRequest = gapi.client.gmail.users.messages.list({
+          'userId': userId
+        });
+        getPageOfMessages(initialRequest, []);
+      }
+
+      /**
+      helper function to decode message from base64url to utl-8
+      */
+      function base64_charIndex(c) {
+        if (c == "+") return 62;
+        if (c == "/") return 63;
+        return b64u.indexOf(c);
+      }
+
+      /**
+      decodes message from base64url to utf-8
+      */
+      function getMessageSnippet(resultId, messageId) {
+        var decodedString = "";
+        var i, a, b, c, d, z;
+        var userId = "me";
+        var request = gapi.client.gmail.users.messages.get({
+          'userId' : userId,
+          'id' : messageId
+        });
+        request.execute(function(resp) {
+          var snippet = resp.payload.parts[1].body.data;
+         // console.log(snippet);
+    
+          for (i = 0; i < snippet.length - 3; i += 4) {
+            a = base64_charIndex(snippet.charAt(i+0));
+            b = base64_charIndex(snippet.charAt(i+1));
+            c = base64_charIndex(snippet.charAt(i+2));
+            d = base64_charIndex(snippet.charAt(i+3));
+
+            decodedString += String.fromCharCode((a << 2) | (b >>> 4));
+            if (snippet.charAt(i+2) != b64pad)
+                decodedString += String.fromCharCode(((b << 4) & 0xF0) | ((c >>> 2) & 0x0F));
+            if (snippet.charAt(i+3) != b64pad)
+                decodedString += String.fromCharCode(((c << 6) & 0xC0) | d);
+          }
+          decodedString = decodeURIComponent(escape(decodedString));
+          getMessageDetails(resultId, decodedString);
+        });  
+      }
+
+
+      /**
+      gets the shortened URL from the long URL extracted from getMessageDetails
+      Long url consists of a hyperlink within it, hence start of short url, starts from hyperlink
+      within long url. End of short url is when '&' appears in the long url, i.e. when it appends extra 
+      characters. 
+      */
+      function getShortUrl(longUrl) {    
+        var resultIndex = indexes(longUrl, "url=http");
+        var shortUrl = longUrl.substring(resultIndex[0]+4, longUrl.length);
+        var n = shortUrl.indexOf("\\u0026");
+        n = (n==-1 ? shortUrl.indexOf("&") : n);
+        shortUrl = shortUrl.substring(0, n);
+        return shortUrl;
+      }
+
+      /**
+      extracts message details from the decoded message 
+      such as message id, type, title, description and URL and stores in an array
+      */
+      function getMessageDetails(resultId, decodedString) {
+        var result = indexes(decodedString, "widgets");
+        var titles = [];
+        for (var i = 0; i < result.length; i++) {
+          var decodedMessage = decodedString.substring(result[i], decodedString.length);
+          decodedMessage = decodedMessage.substring(10, decodedMessage.indexOf(decodedMessage.match(/} ]/))+3);
+          var messageDetailsObj = JSON.parse(decodedMessage);
+          messageDetailsObj[0].shortURL = getShortUrl(messageDetailsObj[0].url);          
+          
+          messageDetails.push(resultId);
+          messageDetails.push(messageDetailsObj[0].type);
+          messageDetails.push(messageDetailsObj[0].title);
+          messageDetails.push(messageDetailsObj[0].description);
+          messageDetails.push(messageDetailsObj[0].shortURL);
+        }
+      }
+
+
+
+      /**
+      helper function to getShortUrl function to find 
+      index of start of short url
+      */
+      function indexes(source, find) {
+        var result = [];
+        for (i = 0; i < source.length; ++i) {
+          if (source.substring(i, i + find.length) == find) {
+            result.push(i);
+          }
+        }
+        return result;
+      }
+
+      /**
+      uses Diffbot Article API by performing an http get request. 
+      The Diffbot Article API extracts text from URL, and returns title of article, full text, 
+      published date, article author, site name, tags etc.
+      Diffbot API returns "undefined" when there are no tags, hence no tag label, tag score and tag count.
+      This results in an error, hence initially "undefined" is inserted for tag label, tag score, and tag count 
+      and if a value exists "undefined" is replaced with actual value.
+      */
+      function diffbotGetRequest() {
+        //var cnt = 0;
+      for (var i=4; i<(messageDetails.length); i=i+5) {
+      var extractedUrl = messageDetails[i];
+      console.log(extractedUrl);
+
+
+        clientBot.article.get({
+                      url: extractedUrl
+                  }, function onSuccess(response) {
+                    diffbotResponse.push(response["objects"][0]["title"]);
+                    console.log(response["objects"][0]["title"]);
+                    diffbotResponse.push(response["objects"][0]["type"]);
+                    diffbotResponse.push(response["objects"][0]["pageUrl"]);                    
+                    diffbotResponse.push(response["objects"][0]["estimatedDate"]);
+                    diffbotResponse.push(response["objects"][0]["date"]);
+                    diffbotResponse.push(response["objects"][0]["author"]); 
+                    diffbotResponse.push(response["objects"][0]["publisherCountry"]);         
+                    diffbotResponse.push(response["objects"][0]["siteName"]);
+
+                    var tagLabel = new Array();
+                    var tagScore = new Array();
+                    var tagCount = new Array();
+
+                    diffbotResponse.push("undefined");
+                    diffbotResponse.push("undefined");
+                    diffbotResponse.push("undefined");
+
+                      for (j=0; j<response["objects"][0]["tags"].length; j++) {
+                        tagLabel.push(response["objects"][0]["tags"][j]["label"]);
+                        tagScore.push(response["objects"][0]["tags"][j]["score"]);
+                        tagCount.push(response["objects"][0]["tags"][j]["count"]);
+                      }
+                      diffbotResponse[diffbotResponse.length-3] = tagLabel;
+                      diffbotResponse[diffbotResponse.length-2] = tagScore;
+                      diffbotResponse[diffbotResponse.length-1] = tagCount;  
+                      }, function onError(response) {
+                        switch(response.errorCode) {
+                          case 401:
+                              alert(response.error)
+                              break;
+                          case 404:
+                              alert(response.error)
+                              break;
+                          case 500:
+                              alert(response.error)
+                              break;
+                        }
+                  });
+        }
+      }  
+
+      /**
+      creates a json array of message details extracted, and url details extracted by diffbot.
+      */
+      function createResponseJSON() { 
+
+        console.log("in create json" + diffbotResponse.length);
+       for (i = 0; i < (diffbotResponse.length); i=i+11) {
+            var responseObj = {"title": diffbotResponse[i], "type":diffbotResponse[i+1], "url":diffbotResponse[i+2], "estimatedDate":diffbotResponse[i+3], "date":diffbotResponse[i+4], "author":diffbotResponse[i+5], "publisherCountry":diffbotResponse[i+6], "siteName":diffbotResponse[i+7], "tagLabel":diffbotResponse[i+8], "tagScore":diffbotResponse[i+9], "tagCount":diffbotResponse[i+10]};
+            var responseJson = JSON.stringify(responseObj);
+            extractedArticleDetails.push(responseJson);
+       }
+
+        console.log("diffbot response arr length = " + diffbotResponse.length);
+        console.log(extractedArticleDetails);
+      }
+
+    </script>
+    <script src="https://apis.google.com/js/client.js?onload=handleClientLoad"></script>
+  </body>
+</html>
